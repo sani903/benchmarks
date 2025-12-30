@@ -9,7 +9,8 @@ import torch
 from pathlib import Path as PathLib
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader
-
+from openhands.sdk.context.skills import Skill
+from openhands.sdk import AgentContext
 from benchmarks.utils.dataset import prepare_dataset
 
 # from benchmarks.utils.args_parser import get_parser
@@ -518,6 +519,9 @@ class AgenticCodeSearchEvaluation(Evaluation):
         if len(tool_names) > 0:
             tools = []
             for tool_name in tool_names:
+                # Skip semantic_search as it's handled via MCP, not direct tool
+                if tool_name == "semantic_search":
+                    continue
                 if tool_name in TOOL_MAP:
                     tools.append(Tool(name=TOOL_MAP[tool_name].name))
                 else:
