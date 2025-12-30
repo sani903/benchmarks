@@ -9,8 +9,11 @@ def main(args):
     f1_module = 0
     num_steps = 0
     num_tool_calls = 0
+    num_mcp_calls = 0
+    semantic_search_calls = 0
     total_time = 0
     cnt = 0
+    
     with open(results_file, "r") as f:
         for line in f:
             result = json.loads(line)
@@ -19,6 +22,10 @@ def main(args):
                 num_steps += test_result["num_steps"]
             if "num_tool_calls" in test_result:
                 num_tool_calls += test_result["num_tool_calls"]
+            if "num_mcp_calls" in test_result:
+                num_mcp_calls += test_result["num_mcp_calls"]
+            if "semantic_search_calls" in test_result:
+                semantic_search_calls += test_result["semantic_search_calls"]
             if "wall_time_seconds" in test_result:
                 total_time += test_result["wall_time_seconds"]
 
@@ -34,6 +41,10 @@ def main(args):
     print(f"Average Function F1 score: {f1_function / cnt:.4f} over {cnt} samples")
     print(f"Average # of steps: {num_steps / cnt:.4f} over {cnt} samples")
     print(f"Average # of tool calls: {num_tool_calls / cnt:.4f} over {cnt} samples")
+    if num_mcp_calls > 0:
+        print(f"Average # of MCP calls: {num_mcp_calls / cnt:.4f} over {cnt} samples")
+    if semantic_search_calls > 0:
+        print(f"Average # of semantic search calls: {semantic_search_calls / cnt:.4f} over {cnt} samples")
     print(f"Average wall time (s): {total_time / cnt:.4f} over {cnt} samples")
 
 
