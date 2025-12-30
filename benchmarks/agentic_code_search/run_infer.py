@@ -5,7 +5,7 @@ import time
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import List
-import ray
+import torch
 from pathlib import Path as PathLib
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader
@@ -437,7 +437,7 @@ class AgenticCodeSearchEvaluation(Evaluation):
             f"Failed to checkout to commit {base_commit_id}: {checkout_commit.stderr}"
         )
 
-        # ADD MCP SEMANTIC SEARCH SETUP
+        # INDEX REPO FOR SEMANTIC SEARCH (if enabled)
         tool_names = (
             self.metadata.details.get("tools", [])
             if isinstance(self.metadata.details, dict)
@@ -445,51 +445,60 @@ class AgenticCodeSearchEvaluation(Evaluation):
         )
         
         if "semantic_search" in tool_names:
-            logger.info(f"Setting up semantic search for instance {instance.id}")
+            logger.info(f"Indexing repo for semantic search: {instance.id}")
             
-            # Initialize Ray if needed
-            if not ray.is_initialized():
-                ray.init(ignore_reinit_error=True)
-            
-            # Get or create embedding service
-            from src.services.embedding_service import get_embedding_service
-            
-            try:
-                embedding_service = ray.get_actor("embedding_service")
-                logger.info("Using existing embedding service")
-            except ValueError:
-                logger.info("Creating new embedding service")
-                embedding_service = get_embedding_service(
-                    max_indices=10,
-                    max_cache_size_gb=50.0
-                )
-            
-            # Enter indexing phase
-            ray.get(embedding_service.enter_indexing_phase.remote())
+            # We'll use a simple direct indexing approach for eval
+            # (not the Ray actor approach used in training)
+            from src.tools.semantic_search import SemanticSearch
+            from src.mcp_server.training_semantic_search_server import get_repo_commit_hash
             
             repo_name = instance.data["repo"]
             base_commit = instance.data["base_commit"]
+            repo_commit_hash = get_repo_commit_hash(repo_name, base_commit)
             
-            # Index this repo
-            logger.info(f"Indexing {repo_name}@{base_commit[:7]}...")
-            try:
-                ray.get(embedding_service.get_or_load_index.remote(
-                    repo_name=repo_name,
-                    commit=base_commit,
-                    repo_path=repo_dir
-                ))
-                logger.info(f"✓ Indexed {repo_name}@{base_commit[:7]}")
-            except Exception as e:
-                logger.error(f"Failed to index {repo_name}: {e}")
-                raise
+            # Set cache directory
+            cache_dir = PathLib.home() / ".cache" / "swebench_indices"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            index_path = cache_dir / repo_commit_hash
+            ready_file = index_path / ".ready"
             
-            # Switch to retrieval phase for inference
-            ray.get(embedding_service.enter_retrieval_phase.remote())
-            logger.info(f"✓ Semantic search ready for {instance.id}")
+            # Index if not already done
+            if not ready_file.exists():
+                logger.info(f"Creating index for {repo_name}@{base_commit[:7]}...")
+                
+                # Create index directly (no Ray actors needed for eval)
+                search = SemanticSearch(
+                    collection_name=f"code_{repo_commit_hash}",
+                    persist_directory=str(index_path),
+                    embedding_model_name="jinaai/jina-code-embeddings-0.5b",
+                    reranker_model_name=None,  # No reranker for faster eval
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    num_threads=4,
+                )
+                
+                stats = search.index_code_files(str(repo_dir), file_extensions=[".py"])
+                
+                if stats["total_chunks"] > 0:
+                    ready_file.touch()
+                    logger.info(f"✓ Indexed {stats['total_chunks']} chunks for {repo_name}")
+                else:
+                    logger.warning(f"No chunks indexed for {repo_name}")
+                    
+                # Clean up to free memory
+                del search
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            else:
+                logger.info(f"✓ Index already exists for {repo_name}@{base_commit[:7]}")
+            
+            # Store cache dir in instance data for MCP config
+            instance.data["semantic_search_cache_dir"] = str(cache_dir)
 
         logger.info(f"Prepared workspace successfully for instance {instance.id}")
         return workspace
-
+        
     def evaluate_instance(self, instance, workspace):
         """
         Steps:
@@ -560,7 +569,7 @@ class AgenticCodeSearchEvaluation(Evaluation):
                 )
             
             skill = Skill.load(str(skill_path))
-            logger.info(f"Loaded semantic search skill from {skill_path}")
+            logger.info(f"Loaded semantic search skill")
             
             # Setup MCP server wrapper
             wrapper_path = base_path / "scripts" / "run_mcp_server_training.sh"
@@ -573,10 +582,17 @@ class AgenticCodeSearchEvaluation(Evaluation):
             import stat
             wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IEXEC)
             
-            # Configure MCP server with workspace path
-            cache_dir = PathLib.home() / ".cache" / "swebench_indices"
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Get cache dir from instance data (set in prepare_workspace)
+            cache_dir = instance.data.get(
+                "semantic_search_cache_dir",
+                str(PathLib.home() / ".cache" / "swebench_indices")
+            )
             
+            # Configure MCP server
+            # The MCP server will:
+            # 1. Be started by OpenHands SDK when first tool call happens
+            # 2. Load the pre-created index from disk (read-only)
+            # 3. Serve search requests via stdio
             mcp_config = {
                 "mcpServers": {
                     "semantic-code-search": {
@@ -584,9 +600,8 @@ class AgenticCodeSearchEvaluation(Evaluation):
                         "args": [str(wrapper_path)],
                         "env": {
                             "WORKSPACE_PATH": str(instance.data['repo_dir']),
-                            "RAY_ADDRESS": "auto",
-                            "PYTHONPATH": str(base_path),
                             "EMBEDDING_CACHE_DIR": str(cache_dir),
+                            "PYTHONPATH": str(base_path),
                         }
                     }
                 }
@@ -595,7 +610,9 @@ class AgenticCodeSearchEvaluation(Evaluation):
             agent_kwargs["agent_context"] = AgentContext(skills=[skill])
             agent_kwargs["mcp_config"] = mcp_config
             
-            logger.info(f"✓ MCP semantic search configured for instance {instance.id}")
+            logger.info(f"✓ MCP semantic search configured")
+            logger.info(f"  Workspace: {instance.data['repo_dir']}")
+            logger.info(f"  Cache dir: {cache_dir}")
         
         # Create agent with all configs
         agent = Agent(**agent_kwargs)
@@ -667,6 +684,7 @@ class AgenticCodeSearchEvaluation(Evaluation):
         logger.info(f"  Semantic search calls: {semantic_search_calls}")
         event_list = [event for event in conversation.state.events]
 
+        # Cleanup: Remove indexed files to save disk space (optional)
         tool_names = (
             self.metadata.details.get("tools", [])
             if isinstance(self.metadata.details, dict)
@@ -674,19 +692,28 @@ class AgenticCodeSearchEvaluation(Evaluation):
         )
         
         if "semantic_search" in tool_names:
+            # Optional: Clean up index after each instance
+            # Comment out if you want to reuse indices across runs
             try:
-                embedding_service = ray.get_actor("embedding_service")
                 from src.mcp_server.training_semantic_search_server import get_repo_commit_hash
+                import shutil
                 
                 repo_hash = get_repo_commit_hash(
                     instance.data["repo"],
                     instance.data["base_commit"]
                 )
-                ray.get(embedding_service.cleanup_batch_indices.remote([repo_hash]))
-                logger.info(f"Cleaned up index for {instance.id}")
+                cache_dir = instance.data.get(
+                    "semantic_search_cache_dir",
+                    str(PathLib.home() / ".cache" / "swebench_indices")
+                )
+                index_path = PathLib(cache_dir) / repo_hash
+                
+                if index_path.exists():
+                    shutil.rmtree(index_path)
+                    logger.info(f"Cleaned up index for {instance.id}")
             except Exception as e:
-                logger.warning(f"Failed to cleanup index for {instance.id}: {e}")
-        
+                logger.warning(f"Cleanup warning (non-fatal): {e}")
+                
         out = EvalOutput(
             instance_id=instance.id,
             test_result={
@@ -710,11 +737,7 @@ def main():
     start_time = time.time()
     parser = get_parser()
     args = parser.parse_args()
-    # Initialize Ray if semantic search will be used
-    if "semantic_search" in args.tools:
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
-            logger.info("Initialized Ray for semantic search")
+    
     # load LLM configuration
     llm_config_path = args.llm_config_path
     if not os.path.isfile(llm_config_path):
@@ -768,14 +791,7 @@ def main():
         f.write(
             f"Time taken for evaluation: {elapsed_time:.2f} seconds, {elapsed_time / 60:.2f} minutes, {elapsed_time / 3600:.2f} hours"
         )
-    # Cleanup Ray if it was used
-    if "semantic_search" in args.tools:
-        try:
-            if ray.is_initialized():
-                ray.shutdown()
-                logger.info("Shut down Ray")
-        except Exception as e:
-            logger.warning(f"Error shutting down Ray: {e}")
+    
     logger.info("Evaluation completed!")
 
 
