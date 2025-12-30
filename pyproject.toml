@@ -41,6 +41,14 @@ dependencies = [
     "websockets>=12",
     "lmnr>=0.7.20",
     "multi-swe-bench>=1.1.1",
+    # Semantic search dependencies
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+    "tree-sitter>=0.25.2",
+    "tree-sitter-python>=0.23.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "mcp>=0.1.0",
 ]
 
 [project.scripts]
@@ -58,6 +66,9 @@ multiswebench-eval = "benchmarks.multiswebench.eval_infer:main"
 openagentsafety-infer = "benchmarks.openagentsafety.run_infer:main"
 swebenchmultimodal-infer = "benchmarks.swebenchmultimodal.run_infer:main"
 swebenchmultimodal-eval = "benchmarks.swebenchmultimodal.eval_infer:main"
+# Add agentic code search scripts
+agentic-code-search-infer = "benchmarks.agentic_code_search.run_infer:main"
+agentic-code-search-eval = "benchmarks.agentic_code_search.eval_infer:main"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -65,7 +76,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks"]
+include = ["benchmarks", "src"]  # Added "src" to include semantic search code
 
 [tool.setuptools]
 # Install the top-level sitecustomize module so Python auto-loads our Modal logging patch.
@@ -97,7 +108,7 @@ select = ["E", "F", "I"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["benchmarks", "openhands"]
+known-first-party = ["benchmarks", "openhands", "src"]  # Added "src"
 combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
@@ -108,6 +119,15 @@ openhands-tools = { workspace = true }
 openhands-workspace = { workspace = true }
 openhands-agent-server = { workspace = true }
 swt-bench = { git = "https://github.com/logic-star-ai/swt-bench.git" }
+# GPU-enabled PyTorch from CUDA 12.8 index
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+# PyTorch CUDA 12.8 index for GPU support
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.uv.workspace]
 members = [
